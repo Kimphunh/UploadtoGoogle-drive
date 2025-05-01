@@ -65,13 +65,13 @@ jobs:
           # Đặt tên remote là 'gdrive'
           # Trỏ `service_account_file` đến file key tạm đã tạo
           RCLONE_CONFIG_CONTENT="""
-[gdrive]
-type = drive
-scope = drive
-service_account_file = ${SA_KEY_FILE_PATH}
-# Nếu dùng Team Drive (Shared Drive), bỏ comment và điền ID
-# team_drive = YOUR_TEAM_DRIVE_ID
-"""
+          [gdrive]
+          type = drive
+          scope = drive
+          service_account_file = ${SA_KEY_FILE_PATH}
+          # Nếu dùng Team Drive (Shared Drive), bỏ comment và điền ID
+          # team_drive = YOUR_TEAM_DRIVE_ID
+          """
           
           # Ghi nội dung cấu hình vào file rclone.conf
           echo "$RCLONE_CONFIG_CONTENT" > "$RCLONE_CONFIG_DIR/rclone.conf"
