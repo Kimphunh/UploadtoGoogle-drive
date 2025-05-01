@@ -1,0 +1,233 @@
+# Tên của workflow, hiển thị trên tab Actions của GitHub
+name: Optimal Drive Upload (Download & Upload)
+
+# Kích hoạt workflow thủ công qua tab Actions
+on:
+  workflow_dispatch:
+    inputs:
+      # Input URL để download
+      download_url:
+        description: 'URL của file cần tải về'
+        required: true
+        type: string
+      # Input tùy chọn: Tên file mong muốn trên Google Drive
+      output_filename:
+        description: 'Tên file trên Google Drive (tùy chọn, để trống sẽ dùng tên gốc)'
+        required: false
+        type: string
+
+jobs:
+  # Tên job
+  download_and_upload:
+    # Chạy trên máy ảo Ubuntu mới nhất
+    runs-on: ubuntu-latest
+    # Đặt thời gian tối đa cho job phòng trường hợp bị treo
+    timeout-minutes: 30 
+    
+    steps:
+      # Bước 1: Checkout code - Nên có để đảm bảo môi trường chuẩn
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # Bước 2: Cài đặt rclone - Công cụ upload/download cloud mạnh mẽ
+      - name: Install rclone
+        run: |
+          # Cập nhật package list và cài rclone một cách "yên lặng" (-qq)
+          sudo apt-get update -qq 
+          sudo apt-get install -y -qq rclone
+          # In ra phiên bản rclone để kiểm tra
+          echo "rclone installed: $(rclone version)"
+
+      # Bước 3: Cấu hình rclone sử dụng Service Account Key từ Secret
+      - name: Configure rclone for Google Drive
+        env:
+          # Lấy nội dung khóa JSON từ GitHub Secret vào biến môi trường
+          GDRIVE_SA_JSON_KEY_CONTENT: ${{ secrets.GDRIVE_SA_JSON_KEY }}
+        run: |
+          # Kiểm tra cơ bản xem Secret có tồn tại không
+          if [ -z "$GDRIVE_SA_JSON_KEY_CONTENT" ]; then
+            echo "::error::Secret 'GDRIVE_SA_JSON_KEY' chưa được thiết lập hoặc trống!"
+            exit 1
+          fi
+          
+          # Xác định đường dẫn thư mục cấu hình rclone
+          RCLONE_CONFIG_DIR=~/.config/rclone
+          # Tạo thư mục nếu chưa tồn tại
+          mkdir -p "$RCLONE_CONFIG_DIR"
+          
+          # Đường dẫn tới file key tạm thời sẽ được tạo
+          SA_KEY_FILE_PATH="$RCLONE_CONFIG_DIR/gdrive_sa_key.json"
+          
+          # Ghi nội dung JSON từ biến môi trường (Secret) vào file key tạm
+          echo "$GDRIVE_SA_JSON_KEY_CONTENT" > "$SA_KEY_FILE_PATH"
+          
+          # Tạo nội dung cho file rclone.conf
+          # Đặt tên remote là 'gdrive'
+          # Trỏ `service_account_file` đến file key tạm đã tạo
+          RCLONE_CONFIG_CONTENT="""
+[gdrive]
+type = drive
+scope = drive
+service_account_file = ${SA_KEY_FILE_PATH}
+# Nếu dùng Team Drive (Shared Drive), bỏ comment và điền ID
+# team_drive = YOUR_TEAM_DRIVE_ID
+"""
+          
+          # Ghi nội dung cấu hình vào file rclone.conf
+          echo "$RCLONE_CONFIG_CONTENT" > "$RCLONE_CONFIG_DIR/rclone.conf"
+          
+          echo "rclone configuration created successfully."
+          # (Tùy chọn debug) Kiểm tra xem rclone có đọc được cấu hình không
+          # rclone config dump
+
+      # Bước 4: Tải file từ URL bằng curl
+      - name: Download file
+        run: |
+          # Lấy URL gốc từ input
+          URL="${{ github.event.inputs.download_url }}"
+          echo "Download URL: $URL"
+          
+          # Cố gắng xác định tên file cục bộ một cách tốt hơn
+          # Trích xuất phần cuối của đường dẫn URL
+          FILENAME=$(basename "$URL")
+          # Loại bỏ query string (phần sau dấu ?)
+          FILENAME="${FILENAME%%\?*}"
+          # Loại bỏ URL fragment (phần sau dấu #)
+          FILENAME="${FILENAME%%\#*}"
+          # Giải mã các ký tự đặc biệt đã được mã hóa URL (ví dụ: %E4%B8%AD)
+          # Sử dụng printf để xử lý an toàn các ký tự đặc biệt có thể có trong tên file
+          FILENAME_DECODED=$(printf '%b' "${FILENAME//%/\\x}")
+
+          # Xử lý trường hợp không lấy được tên file hoặc tên file trống/là dấu chấm
+          if [[ -z "$FILENAME_DECODED" || "$FILENAME_DECODED" == "." ]]; then
+            # Tạo tên file mặc định duy nhất nếu không lấy được
+            FILENAME_DECODED="downloaded_file_${{ github.run_id }}_${{ github.run_attempt }}.tmp"
+            echo "Cảnh báo: Không thể xác định tên file từ URL. Sử dụng tên mặc định: $FILENAME_DECODED"
+          fi
+
+          echo "Attempting to download as local file: '$FILENAME_DECODED'"
+
+          # Tải file bằng curl:
+          # -L: Theo dõi chuyển hướng (redirects)
+          # --fail: Báo lỗi nếu server trả về lỗi HTTP (vd: 404)
+          # -sS: Chạy ở chế độ im lặng (silent) nhưng vẫn hiện lỗi
+          # -o: Lưu output vào file được chỉ định
+          curl -L --fail -sS -o "$FILENAME_DECODED" "$URL"
+
+          # Kiểm tra xem file đã được tải về thành công chưa (tồn tại và kích thước > 0)
+          if [ ! -s "$FILENAME_DECODED" ]; then
+            echo "::error::Tải file từ $URL thất bại hoặc file tải về bị trống."
+            exit 1
+          fi
+
+          echo "File successfully downloaded as: '$FILENAME_DECODED'"
+          # Lưu tên file cục bộ đã xác định vào biến môi trường cho bước sau
+          echo "LOCAL_DOWNLOADED_FILE=$FILENAME_DECODED" >> $GITHUB_ENV
+
+      # Bước 5: Upload file lên Google Drive bằng rclone
+      - name: Upload file to Google Drive
+        env:
+          # Lấy ID thư mục đích từ Secret
+          TARGET_FOLDER_ID: ${{ secrets.GDRIVE_TARGET_FOLDER_ID }} 
+          # Lấy tên file cục bộ đã tải từ biến môi trường của bước trước
+          LOCAL_FILE: ${{ env.LOCAL_DOWNLOADED_FILE }}
+        run: |
+          # Kiểm tra xem biến môi trường LOCAL_FILE có được set không
+          if [ -z "$LOCAL_FILE" ]; then
+             echo "::error::Biến môi trường LOCAL_DOWNLOADED_FILE không được thiết lập."
+             exit 1
+          fi
+          
+          # Xác định tên file cuối cùng trên Google Drive
+          # Ưu tiên tên file người dùng nhập vào input `output_filename`
+          # Nếu không nhập, sử dụng tên file đã tải về (đã giải mã)
+          REMOTE_FILENAME="${{ github.event.inputs.output_filename }}"
+          if [ -z "$REMOTE_FILENAME" ]; then
+            REMOTE_FILENAME="$LOCAL_FILE"
+          fi
+          
+          # --- Xác định đường dẫn đích trên Google Drive ---
+          # Kiểm tra xem Secret ID thư mục đích có được thiết lập không
+          if [ -z "$TARGET_FOLDER_ID" ]; then
+            echo "::error::Secret 'GDRIVE_TARGET_FOLDER_ID' chưa được thiết lập. Không thể xác định đích upload."
+            # Thoát để buộc người dùng phải thiết lập Secret này
+            exit 1 
+          else
+             # Xây dựng đường dẫn đích sử dụng ID thư mục
+             # Định dạng: remote:{folder_id}/
+             DRIVE_DEST_PATH="gdrive:{${TARGET_FOLDER_ID}}/"
+             echo "Targeting Google Drive Folder ID: $TARGET_FOLDER_ID"
+          fi
+
+          echo "Uploading local file '$LOCAL_FILE' as '$REMOTE_FILENAME' to '$DRIVE_DEST_PATH'"
+
+          # Thực thi lệnh rclone copy
+          # --checksum: Sử dụng checksum để so sánh file (đáng tin cậy hơn modtime/size)
+          # --drive-chunk-size: Tăng kích thước chunk để có thể upload nhanh hơn (vd: 128M)
+          # -P: Hiển thị thanh tiến trình
+          # --drive-stop-on-upload-limit: Dừng nếu đạt giới hạn upload hàng ngày của Google
+          # Có thể thêm -v hoặc --verbose để xem log chi tiết hơn từ rclone nếu cần debug
+          rclone copy "$LOCAL_FILE" "${DRIVE_DEST_PATH}" --checksum --drive-chunk-size 128M -P --drive-stop-on-upload-limit
+
+          # Kiểm tra mã lỗi trả về từ lệnh rclone
+          if [ $? -ne 0 ]; then
+            echo "::error::Lệnh rclone upload thất bại. Kiểm tra log rclone ở trên."
+            exit 1
+          fi
+
+          echo "File upload appears successful based on rclone exit code."
+
+      # Bước 6: Xác minh file đã tồn tại trên Google Drive sau khi upload
+      - name: Verify file existence on Google Drive
+        env:
+          TARGET_FOLDER_ID: ${{ secrets.GDRIVE_TARGET_FOLDER_ID }}
+          LOCAL_FILE: ${{ env.LOCAL_DOWNLOADED_FILE }}
+        run: |
+          # Xác định lại tên file remote (cần thiết trong bước riêng này)
+          REMOTE_FILENAME="${{ github.event.inputs.output_filename }}"
+          if [ -z "$REMOTE_FILENAME" ]; then
+            REMOTE_FILENAME="$LOCAL_FILE"
+          fi
+
+          # Kiểm tra lại ID thư mục đích
+          if [ -z "$TARGET_FOLDER_ID" ]; then
+            echo "::error::Secret 'GDRIVE_TARGET_FOLDER_ID' chưa được thiết lập. Không thể xác minh."
+            exit 1
+          fi
+          
+          # Tạo đường dẫn file đầy đủ trên Drive
+          DRIVE_FILE_PATH="gdrive:{${TARGET_FOLDER_ID}}/$REMOTE_FILENAME"
+          echo "Verifying existence of: $DRIVE_FILE_PATH"
+          
+          # Sử dụng lệnh `rclone size` để kiểm tra sự tồn tại và lấy kích thước file
+          # Lệnh này sẽ báo lỗi nếu file không tồn tại
+          rclone size "$DRIVE_FILE_PATH"
+
+          # Kiểm tra mã lỗi trả về từ lệnh rclone size
+          if [ $? -ne 0 ]; then
+            echo "::error::Xác minh thất bại! rclone không tìm thấy file trên Google Drive sau khi upload."
+            exit 1
+          fi
+          echo "Verification successful: rclone found the file on Google Drive."
+
+      # Bước 7: Dọn dẹp file tạm đã tải về trên máy ảo runner
+      - name: Clean up local file
+        # Luôn chạy bước này, kể cả khi các bước trước thất bại
+        if: always() 
+        env:
+          LOCAL_FILE: ${{ env.LOCAL_DOWNLOADED_FILE }}
+        run: |
+          # Chỉ xóa nếu biến LOCAL_FILE tồn tại và file thực sự tồn tại
+          if [ ! -z "$LOCAL_FILE" ] && [ -f "$LOCAL_FILE" ]; then
+            echo "Cleaning up local file: '$LOCAL_FILE'"
+            rm -f "$LOCAL_FILE"
+          else
+            echo "Biến LOCAL_FILE không được set hoặc file không tồn tại, bỏ qua dọn dẹp."
+          fi
+          
+          # Dọn dẹp cả file key tạm thời
+          SA_KEY_FILE_PATH=~/.config/rclone/gdrive_sa_key.json
+          if [ -f "$SA_KEY_FILE_PATH" ]; then
+             echo "Cleaning up temporary Service Account key file."
+             rm -f "$SA_KEY_FILE_PATH"
+          fi
