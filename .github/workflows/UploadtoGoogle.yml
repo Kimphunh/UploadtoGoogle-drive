@@ -93,7 +93,18 @@ jobs:
             exit 1
           fi
           echo "Upload successful."
-
+        # BƯỚC MỚI THÊM VÀO ĐỂ DEBUG
+      - name: List files in target folder (Debug)
+        if: always() # Luôn chạy để kiểm tra
+        run: |
+          TARGET_FOLDER_ID="14NkZglv1EZ7qTHvqGJv_bE7AGko2dqe7" # Thay ID đúng nếu cần
+          echo "Listing contents of folder ID ${TARGET_FOLDER_ID}"
+          # Lệnh lsf liệt kê tên file
+          rclone lsf "gdrive:{${TARGET_FOLDER_ID}}/"
+          echo "Checking specifically for the uploaded file:"
+          # Lệnh ls liệt kê chi tiết file cụ thể (nếu tồn tại)
+          rclone ls "gdrive:{${TARGET_FOLDER_ID}}/@aurevoir_178-2-%E4%B8%AD%E5%9B%BD%E5%8F%B0%E6%B9%BE-%E7%8C%B4_q6T2yQ.mp4"
+        
 
       - name: Clean up downloaded file # Dọn dẹp file đã tải
         if: always() # Luôn chạy bước này, kể cả khi các bước trước thất bại
